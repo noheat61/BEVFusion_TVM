@@ -40,14 +40,13 @@ torch.onnx.export(
     img_backbone_model,
     (dummy_imgs),
     "onnx/img_backbone.onnx",
-    opset_version=13,
+    opset_version=17,
     input_names=["imgs"],
     output_names=["img_feats"],
     dynamic_axes={
         "imgs":      {0: "batch_size"},
         "img_feats": {0: "batch_size"},
     },
-    do_constant_folding=False
 )
 print("✅ img_backbone.onnx saved")
 
@@ -59,7 +58,7 @@ torch.onnx.export(
     viewtransform_feature_model,
     (dummy_img_features, dummy_depth),
     "onnx/vtransform_feature.onnx",
-    opset_version=13,
+    opset_version=17,
     input_names=["feats", "depth"],
     output_names=["bevpool_feats"],
     dynamic_axes={
@@ -67,7 +66,6 @@ torch.onnx.export(
         "depth":     {0: "batch_size"},
         "bevpool_feats": {0: "batch_size"},
     },
-    do_constant_folding=False
 )
 print("✅ vtransform_feature.onnx saved")
 
@@ -79,14 +77,13 @@ torch.onnx.export(
     viewtransform_downsample_model,
     (dummy_img_bev_feats1),
     "onnx/vtransform_downsample.onnx",
-    opset_version=13,
+    opset_version=17,
     input_names=["feats"],
     output_names=["feats_downsampled"],
     dynamic_axes={
         "feats":                 {0: "batch_size"},
         "feats_downsampled":     {0: "batch_size"},
     },
-    do_constant_folding=False
 )
 print("✅ vtransform_downsample.onnx saved")
 
@@ -98,6 +95,7 @@ torch.onnx.export(
     fusion_model,
     (dummy_img_bev_feats, dummy_pts_bev_feats),
     "onnx/fusion.onnx",
+    opset_version=17,
     input_names=['img_bev','pts_bev'],
     output_names=['fused_bev'],
     dynamic_axes={
@@ -105,7 +103,6 @@ torch.onnx.export(
       'pts_bev':   {0:'batch'},
       'fused_bev': {0:'batch'}
     },
-    opset_version=13,
 )
 print("✅ fusion.onnx saved")
 
@@ -117,6 +114,7 @@ torch.onnx.export(
     head_model,
     (dummy_fused_bev_feats),
     "onnx/head.onnx",
+    opset_version=17,
     input_names=['feats'],
     output_names=['reg', 'height', 'dim', 'rot', 'vel', 'heatmap', 'score', 'query_label'],
     dynamic_axes={
@@ -130,6 +128,5 @@ torch.onnx.export(
       'score':   {0:'batch'},
       'query_label':   {0:'batch'},
     },
-    opset_version=13,
 )
 print("✅ head.onnx saved")
