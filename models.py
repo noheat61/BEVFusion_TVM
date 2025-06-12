@@ -451,6 +451,16 @@ class BEVFusionTVMModel(nn.Module):
         self.onnx_model5 = onnx.load("onnx/head_simp.onnx")
         self.mod5 = from_onnx(self.onnx_model5, shape_dict={"feats": [1, 512, 180, 180]}, dtype_dict={"feats": "float32"})
 
+        self.mod1 = ReplacePadTIRWithNNPad()(self.mod1)
+        self.mod1 = relax.transform.DeadCodeElimination()(self.mod1)
+
+        # TODO: Compiler Optimization
+        self.mod1 = relax.transform.ToMixedPrecision(out_dtype="float16", fp16_input_names=['imgs'])(self.mod1)
+        self.mod2 = relax.transform.ToMixedPrecision(out_dtype="float16", fp16_input_names=['feats', 'depth'])(self.mod2)
+        self.mod3 = relax.transform.ToMixedPrecision(out_dtype="float16", fp16_input_names=['feats'])(self.mod3)
+        self.mod4 = relax.transform.ToMixedPrecision(out_dtype="float16", fp16_input_names=['img_bev', 'pts_bev'])(self.mod4)
+        self.mod5 = relax.transform.ToMixedPrecision(out_dtype="float16", fp16_input_names=['feats'])(self.mod5)
+
         # TODO: Compiler Optimization
         self.mod1 = relax.get_pipeline("zero")(self.mod1)
         self.mod2 = relax.get_pipeline("zero")(self.mod2)
@@ -496,7 +506,8 @@ class BEVFusionTVMModel(nn.Module):
     def forward(self, imgs, points, metas):
 
         t0 = time.perf_counter()
-        img_feats_tvm = self.vm1["main"](imgs)
+        img_feats_tvm = self.vm1["main"](imgs.to(torch.float16))
+        img_feats = dlpack.from_dlpack(img_feats_tvm.to_dlpack())
         tvm.cuda().sync()
         elapsed = time.perf_counter() - t0
         self._timing['img_backbone']['sum']   += elapsed
@@ -507,7 +518,8 @@ class BEVFusionTVMModel(nn.Module):
         depth = utils.calculate_depth(imgs, points, metas["lidar2img"], metas["img_aug_matrix"], metas["lidar_aug_matrix"])
 
         t0 = time.perf_counter()
-        bevpool_feats_tvm = self.vm2["main"](img_feats_tvm, depth)
+        bevpool_feats_tvm = self.vm2["main"](img_feats.to(torch.float16), depth.to(torch.float16))
+        bevpool_feats = dlpack.from_dlpack(bevpool_feats_tvm.to_dlpack())
         tvm.cuda().sync()
         elapsed = time.perf_counter() - t0
         self._timing['vtransform_feat']['sum']   += elapsed
@@ -518,7 +530,6 @@ class BEVFusionTVMModel(nn.Module):
         geom = utils.get_geometry(metas["cam2img"], metas["cam2lidar"], metas["img_aug_matrix"], metas["lidar_aug_matrix"])
 
         t0 = time.perf_counter()
-        bevpool_feats = dlpack.from_dlpack(bevpool_feats_tvm.to_dlpack())
         img_bev_features = cuda_utils.bev_pool(geom, bevpool_feats[:len(points)], self.bevpool_layer)
         elapsed = time.perf_counter() - t0
         self._timing['vtransform_bevpool']['sum']   += elapsed
@@ -527,7 +538,8 @@ class BEVFusionTVMModel(nn.Module):
         ###################################
 
         t0 = time.perf_counter()
-        feats_downsampled_tvm = self.vm3["main"](img_bev_features)
+        feats_downsampled_tvm = self.vm3["main"](img_bev_features.to(torch.float16))
+        feats_downsampled = dlpack.from_dlpack(feats_downsampled_tvm.to_dlpack())
         tvm.cuda().sync()
         elapsed = time.perf_counter() - t0
         self._timing['vtransform_down']['sum']   += elapsed
@@ -555,7 +567,8 @@ class BEVFusionTVMModel(nn.Module):
         ###################################
 
         t0 = time.perf_counter()
-        fused_bev_tvm = self.vm4["main"](feats_downsampled_tvm, pts_bev_features)
+        fused_bev_tvm = self.vm4["main"](feats_downsampled.to(torch.float16), pts_bev_features.to(torch.float16))
+        fused_bev = dlpack.from_dlpack(fused_bev_tvm.to_dlpack())
         tvm.cuda().sync()
         elapsed = time.perf_counter() - t0
         self._timing['fusion']['sum']   += elapsed
@@ -565,7 +578,7 @@ class BEVFusionTVMModel(nn.Module):
 
         t0 = time.perf_counter()
         reg_tvm, height_tvm, dim_tvm, rot_tvm, vel_tvm, heatmap_tvm, score_tvm, query_label_tvm \
-            = self.vm5["main"](fused_bev_tvm)
+            = self.vm5["main"](fused_bev.to(torch.float16))
         tvm.cuda().sync()
         reg = dlpack.from_dlpack(reg_tvm.to_dlpack())
         height = dlpack.from_dlpack(height_tvm.to_dlpack())
@@ -653,3 +666,41 @@ def bind_threads(func: tir.PrimFunc,
     sch.bind(tx2, "threadIdx.x")
     
     return sch.mod["f"]
+
+from tvm import relax
+from tvm.relax.expr_functor import PyExprMutator, mutator
+
+@mutator
+class Rewriter(PyExprMutator):
+    def __init__(self, mod):
+        super().__init__(mod)
+
+    def visit_call_(self, call: relax.Call):
+        if call.op == tvm.ir.Op.get("relax.call_tir"):
+            gv = call.args[0]
+            if isinstance(gv, relax.GlobalVar) and "pad" in gv.name_hint:
+                if gv.name_hint == "pad":
+                    pad_width = [(0,0), (0,6), (0,6), (0,0)]
+                if gv.name_hint == "pad1":
+                    pad_width = [(0,0), (0,3), (0,3), (0,0)]
+                if gv.name_hint == "pad2":
+                    pad_width = [(0,0), (0,5), (0,5), (0,0)]
+                if gv.name_hint == "pad3":
+                    pad_width = [(0,0), (0,6), (0,6), (0,0)]
+
+                data = self.visit_expr(call.args[1][0])
+                pad_width = [tvm.tir.IntImm("int64", v) for pair in pad_width for v in pair]
+                return relax.op.nn.pad(data, pad_width, pad_value=0.0)
+
+        return super().visit_call_(call)
+
+            
+@tvm.transform.module_pass(opt_level=0, name="ReplacePadTIRWithNNPad")
+class ReplacePadTIRWithNNPad:
+    def transform_module(self, mod, ctx):
+        rewriter = Rewriter(mod)
+        for g_var, func in mod.functions.items(): 
+            if isinstance(func, relax.Function):
+                new_func = rewriter.visit_expr(func)
+                rewriter.builder_.update_func(g_var, new_func)
+        return rewriter.builder_.get()
