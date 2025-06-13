@@ -45,6 +45,8 @@ cd ..
 
 pip install onnx
 pip install onnxruntime-gpu
+pip install onnx-simplifier
+pip install onnxconverter-common
 pip install spconv-cu120
 
 # transfusion_head.py 320, 334, 336, 339, 760번째 줄 아래처럼 바꾸기
